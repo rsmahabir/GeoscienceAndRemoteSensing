@@ -1,0 +1,331 @@
+#Geo-information ------
+library(raster)
+library(rgdal)
+library(maptools)
+library(RStoolbox)
+ 
+#Accuraccy assessments and modelling
+library(PresenceAbsence)
+library(sp)
+library(psych)
+ 
+#Random forest classifiers
+library(rpart)
+library(randomForest)
+ 
+#SDM package
+library(dismo)
+library(e1071)
+ 
+#evaluation
+library(PresenceAbsence)
+library(caret)
+ 
+library(rgbif)
+ 
+#fetching occurrences (no filters or data prep done)
+bac.key <- name_suggest(q="Baccharis spicata (Lam.) Baill.",rank="species")
+bac.key
+#bacharis spicata
+occ_count(taxonKey=8205774,georeferenced=TRUE)
+#occ_count(taxonKey=3129275,georeferenced=TRUE)
+ 
+bach.data <- occ_search(taxonKey=8205774,hasCoordinate=TRUE,hasGeospatialIssue=FALSE,
+                        return='data',limit=25000)
+gbifmap(bach.data) #i will waste no time in occurrence selection since this is just an example.
+ 
+#downloading wclim and pca calculation (i will waste no time selecting covariates since it is just an example, i will just make a PCA to train the glm because (why not))
+climate <- getData('worldclim', var='bio', res=2.5)
+climate.pca <- rasterPCA(climate)
+ 
+#writing rasters to avoid repetition of download and pca calculation
+writeRaster(climate.pca$map,
+            filename="path2folder/bio_25_pca.tif",
+            overwrite=TRUE,
+            options=c("COMPRESS=LZW"))
+writeRaster(climate,
+            filename="path2folder/bio_25.tif",
+            overwrite=TRUE,
+            options=c("COMPRESS=LZW"))
+ 
+#dumping the pca caracteristics
+sink("C:/Users/Invader/Desktop/bacharis/bio_25_pca_dump01.txt")
+climate.pca$call
+print("------------------------------------")
+climate.pca$model
+sink()
+ 
+ 
+#subsetting world so we do not bias our prediction against portugal
+e.SAm <- extent(-70,-40,-42,-20) #it's ok an as exploratory extent
+e.POR <- extent(-10,-7,35,45) #extend of "portugal"
+ 
+climate.crop <- crop(climate,e.SAm)
+plot(climate.crop$bio1)
+points(bach.data$decimalLongitude,bach.data$decimalLatitude)
+ 
+climate.crop <- crop(climate,e.SAm)
+cli.pca.crop <- crop(climate.pca$map,e.SAm)#native range
+ 
+cli.pca.crop.pt <- crop(climate.pca$map,e.POR)#portugal
+climate.crop.pt <- crop(climate,e.POR)
+ 
+#creating a 1/0 raster dataset for training
+my.bac.shp <- bach.data
+coordinates(my.bac.shp) <- c("decimalLongitude","decimalLatitude") #creating shape
+my.bac.shp$ValPre <- 1 #creating field of the shp with value 1
+my.ctrl.rst <- cli.pca.crop$PC1*0 #creating absences
+ 
+my.occ.bac.rst <- rasterize(my.bac.shp,
+                            my.ctrl.rst,
+                            field=90,
+                            update=TRUE,
+                            updateValue=1)
+ 
+my.occ.bac.rst <- my.occ.bac.rst>0
+ 
+#creating a new shapefile with only the occurrences
+my.occ.bac.PA.shp <- rasterToPoints(my.occ.bac.rst,
+                                    spatial=TRUE)
+ 
+ 
+#let's make a stack
+my.occ.bac.PA.shp.ext <- extract(cli.pca.crop, #the covariates
+                                 my.occ.bac.PA.shp, #the target shapefile
+                                 sp=TRUE) #adds as attributes (columns)
+ 
+rdy.bac.df <- as.data.frame(my.occ.bac.PA.shp.ext) #first column is the presence/absence, 19 columsn for the PCA (in this case), 2 coluns for xy - this makes it easily adaptable for e.g. biomod2
+ 
+rdy.bac.df.noXy <- rdy.bac.df[,c(1:20)]
+ 
+names(rdy.bac.df.noXy) <- c("bacharisPA",names(rdy.bac.df.noXy)[2:20])
+ 
+#creating a subset for validation and then 2 subset
+trainIndex <- createDataPartition(rdy.bac.df.noXy$bacharisPA,
+                                  p = .7,
+                                  list=FALSE,
+                                  time=1)
+train.df <- rdy.bac.df.noXy[trainIndex,]
+valid.df <- rdy.bac.df.noXy[-trainIndex,]
+ 
+#confirm the PA (it's guaranteed)
+unique(train.df$bacharisPA)
+unique(valid.df$bacharisPA)
+ 
+#modelling the glm
+model.glm <- glm(bacharisPA~.,data=train.df,family = "binomial")
+ 
+#predicting for validation
+valid.df$mdl_glm <- predict(model.glm,
+                            newdata=valid.df,
+                            type="response")
+ 
+#creating a set of evaluations
+my.evaluation <- data.frame("plotID"=1:nrow(valid.df),
+                            "Observed"=as.numeric(valid.df$bacharisPA),
+                            #"RandF"=as.numeric(as.character(valid.df$mdl_RF)),
+                            "GLM"=valid.df$mdl_glm)
+ 
+ 
+presence.absence.accuracy(my.evaluation,
+                          which.model=1)
+auc.roc.plot(my.evaluation,which.model=1)
+my.prob.raster.native <- predict(cli.pca.crop,
+                          model=model.glm,type="response")
+plot(my.prob.raster.native)
+my.prob.raster.invaded <- predict(cli.pca.crop.pt,
+                                 model=model.glm,type="response")
+plot(my.prob.raster.invaded)
+writeRaster(my.prob.raster.invaded,
+            "path2folder/GLM_PCA_Portugal_predicted.tif")
+ 
+ 
+ 
+#lets try a biomod2, using bioclimatic variables
+#lets have a a nice folder for storing
+setwd("path2folder/biomod_out/")
+ 
+my.occ.biomod2.shp <- extract(climate.crop, #the covariates
+                              my.occ.bac.PA.shp, #the target shapefile
+                              sp=TRUE) #adds as attributes (columns)
+ 
+plot(my.occ.biomod2.shp) #takes some time, should plot a big big thing
+ 
+#in this case we wll not partition the data, we will trust biomod2 internal validation
+library(biomod2)
+detach("RStoolbox",unload=TRUE)
+ 
+my.occ.biomod2.df <- as.data.frame(my.occ.biomod2.shp) #so now we have a nice DF with everything, we can re-arrange to prepare for biomod
+ 
+#lets keep using the variable names of the tutorial
+#the name of my species
+myRespName <- "Bacharis"
+ 
+#the 1/NA(or 0) response
+myResp <- my.occ.biomod2.df$layer #the 1/0 response (ouff lets make 0 to NAN)
+myResp[myResp==0]<- NA
+unique(myResp) #must yield NA 1
+ 
+#the x,y coorditaes that biomod likes to use
+myRespXY <- my.occ.biomod2.df[,c("x","y")]
+ 
+#getting the covariates
+myExpl <- my.occ.biomod2.df[,c(2:20)] #this can change depending on the number of covariates, basically, 2 to 20 is 1 to 19 in worldclim data
+ 
+ 
+ 
+ 
+ 
+#we are ready to go into biomod2 (since i used the same names as the tutorial, basically, you have to just copy paste the tutorial but
+#im going a bit further to have PA and etc)
+myBiomodData <- BIOMOD_FormatingData(resp.var = myResp,
+                                     expl.var = myExpl,
+                                     resp.xy = myRespXY,
+                                     resp.name = myRespName,
+                                     PA.nb.rep = 5, #5 sets of pseudo absences
+                                     PA.nb.absences = sum(my.occ.biomod2.df$layer,na.omit=TRUE), #lets give him the same number of Pseudo-absences as presences
+                                     PA.strategy = 'random',
+                                     PA.dist.min = 0,
+                                     PA.dist.max = NULL,
+                                     PA.sre.quant = 0.025,
+                                     na.rm = TRUE)
+ 
+ 
+myBiomodData
+#plot(myBiomodData) takes time, so it is useless
+ 
+#if you want to check the details of all commands, check the package details
+myBiomodModelOut <- BIOMOD_Modeling(
+  myBiomodData,
+  models = c('GLM','GAM','GBM','CTA','ANN','FDA','MARS','RF','MAXENT.Tsuruoka'),
+  models.options = BIOMOD_ModelingOptions(GAM = list( algo = 'GAM_gam'),
+                                          MAXENT.Phillips = list(path_to_maxent.jar = 'path2folder/maxent.jar')), #point towards your maxent folder
+  NbRunEval=10,
+  DataSplit=80,
+  Prevalence=0.5,
+  VarImport=3,
+  models.eval.meth = c('TSS','ROC'),
+  SaveObj = TRUE,
+  rescal.all.models = TRUE,
+  do.full.models = FALSE,
+  modeling.id = paste(myRespName,"FirstModeling",sep=""))
+ 
+warnings()
+myBiomodModelOut
+ 
+ 
+myBiomodModelEval <- get_evaluations(myBiomodModelOut)
+ 
+sink("path2folder/biomod_out/biomod_eval.txt")
+myBiomodModelEval
+sink()
+ 
+sink("path2folder/biomod_out/biomod_varimp.txt")
+get_variables_importance(myBiomodModelOut)
+sink()
+ 
+ 
+#time for ensemble
+myBiomodEM <- BIOMOD_EnsembleModeling(
+  modeling.output = myBiomodModelOut,
+  chosen.models = 'all',
+  em.by='all',
+  eval.metric = c('ROC'),
+  eval.metric.quality.threshold = c(0.7),
+  prob.mean = T,
+  prob.cv = T,
+  prob.ci = T,
+  prob.ci.alpha = 0.05,
+  prob.median = T,
+  committee.averaging = T,
+  prob.mean.weight = T,
+  prob.mean.weight.decay = 'proportional' )
+ 
+myBiomodEMEval <- get_evaluations(myBiomodEM)
+ 
+ 
+sink("path2folder/biomod_EM_eval.txt")
+myBiomodEMEval
+sink()
+ 
+ 
+#Projections
+ 
+#first to native area:
+myBiomodProj <- BIOMOD_Projection( #takes sometime, run only of you are interested to see the prediction map of your training area
+  modeling.output = myBiomodModelOut,
+  new.env = myExpl,
+  proj.name = 'native',
+  selected.models = 'all',
+  xy.new.env= myRespXY,
+  binary.meth = 'ROC',
+  filtered.meth = "ROC",
+  compress = 'xz',
+  clamping.mask = TRUE)
+ 
+ 
+#creating the projection for the "invaded" area
+#we need to create a table of XY and bioclimatic variables
+my.pt.shp <- rasterToPoints(climate.crop.pt,
+                            spatial=TRUE)
+my.pt.shp.df <- as.data.frame(my.pt.shp)
+ 
+#we are now ready to project the model to portugal
+myBiomodProj.pt <- BIOMOD_Projection( #takes sometime, run only of you are interested to see the prediction map of your training area
+  modeling.output = myBiomodModelOut,
+  new.env = my.pt.shp.df[,c(1:19)],
+  proj.name = 'invaded',
+  selected.models = 'all',
+  xy.new.env= my.pt.shp.df[,c(20:21)],
+  binary.meth = 'ROC',
+  filtered.meth = "ROC",
+  compress = 'xz',
+  clamping.mask = TRUE)
+ 
+#ensemble forecast
+myBiomodEF.pt <- BIOMOD_EnsembleForecasting(projection.output = myBiomodProj.pt,
+                                                   EM.output = myBiomodEM,
+                                                   total.consensus = TRUE,
+                                                   binary.meth = 'ROC',
+                                                   filtered.meth = "ROC")
+plot(myBiomodEF.pt)
+ 
+#lets rebuild the raster (if biomod had been initiated as a raster this wold not have been necessary)
+#creating a dataframe
+nrow(myBiomodEF.pt@xy.coord)
+myEM.shp <- data.frame("ID"=seq(1:nrow(myBiomodEF.pt@xy.coord)))
+myEM.shp$X_WGS84 <- myBiomodEF.pt@xy.coord[,1]
+myEM.shp$Y_WGS84 <- myBiomodEF.pt@xy.coord[,2]
+ 
+#loading ensemble output
+load("path2folder/proj_invaded_Bacharis_ensemble_ROCfilt.Rdata")
+ 
+ 
+myEM.shp <- cbind(myEM.shp,
+                       proj_invaded_Bacharis_ensemble_ROCfilt)#here is the file name of the model
+ 
+#remaking the shapefile
+coordinates(myEM.shp)<-~X_WGS84+Y_WGS84 #this transforms the dataFrame to a SpatialPointsDataFrame
+projection(myEM.shp) <- projection(climate.crop.pt)
+ 
+ 
+#creating a raster
+names(myEM.shp)
+myEM.shp.meanROCfilter <- myEM.shp[ ,2]
+ 
+rasterize(myEM.shp,
+          raster(cli.pca.crop.pt,layer=1)*0,
+          field=names(myEM.shp)[2],
+          #background=0,
+          filename="path2folder/my_PT_EMpredict.tif",
+          options=c("COMPRESS=LZW"),
+          overwrite=TRUE)
+ 
+#normalizing
+my.rst <- raster("path2folder/my_PT_EMpredict.tif")
+cellStats(my.rst,min)
+my.rst <- my.rst/cellStats(my.rst,max)*100
+plot(my.rst)
+ 
+writeRaster(my.rst,
+            "path2folder/my_PT_EMpredict_normalized.tif")
