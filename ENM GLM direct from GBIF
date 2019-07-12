@@ -1,0 +1,148 @@
+#Geo-information ------
+library(raster)
+library(rgdal)
+library(maptools)
+library(RStoolbox)
+ 
+#Accuraccy assessments and modelling
+library(PresenceAbsence)
+library(sp)
+library(psych)
+ 
+#Random forest classifiers
+library(rpart)
+library(randomForest)
+ 
+#SDM package
+library(dismo)
+library(e1071)
+ 
+#evaluation
+library(PresenceAbsence)
+library(caret)
+ 
+#get WCLIM Dataset
+w = getData('worldclim', var='tmin', res=0.5, lon=-8, lat=42) #Downloading a WCLIM tile set
+#plot(w)
+ 
+e <- extent(-10,-7,35,45) #extend of "portugal"
+w <- crop(w,e)
+ 
+ 
+my.pinus <- gbif("Pinus pinaster",  #downloading by spcies
+                 geo=T, #only spcies with coodrinates
+                 removeZeros=T, #another as above
+                 ext=e) #only occurrences withing given extent
+ 
+my.pinus.pts <-subset(my.pinus, lat !=0 & lon !=0) #removing other erroneous occurrences (redudant)
+ 
+coordinates(my.pinus.pts) <- c("lon","lat") #transforing my.pinus.pts into a SpatialPointsDataFrame
+ 
+#for visuzalizing
+plot(w$tmin1_15)
+points(my.pinus.pts)
+ 
+#we have too many points in the dataset, these would have to be cleaned to have only 1 occurence per resolution - a simple way is to rasterize and convert back to a shapefile
+my.pinus.pts$ValueForRaster <- 1
+names(my.pinus.pts)
+#creating a bacckground raster
+my.pinus.rst <- w$tmin1_15
+my.pinus.rst <- my.pinus.rst*0 #creatings a background raster with value 0
+ 
+my.pinus.rst <- rasterize(my.pinus.pts, #selecting the points dataset
+                          my.pinus.rst, #selecting the raster or raster stack for extent and raster cell size
+                          field=93, #field on which to rasterize from
+                          update=TRUE, #update values from input raster with givenv value where shapefile occurs,
+                          updateValue=1)
+                          #mask=TRUE) #other can be added so that output raster only has values for non-NA values of input raster
+ 
+plot(my.pinus.rst) #occurrences are dificult to see
+plot(my.pinus.rst, ext=e) #better but still not visible - there are methods to plot country borders (data(wrld_simpl)) but not working in my case for some reason
+ 
+#now we need only one occurrence per cell zei
+my.pinus.rst.pa <- my.pinus.rst > 0
+plot(my.pinus.rst.pa, ext=e,col =c("green","red")) #seems ok but we can visualize even closer
+points(my.pinus.pts,pch=19)
+ 
+e.2 <- extent(-8.5,-8,41,41.5)
+ 
+plot(my.pinus.rst.pa, ext=e.2,col =c("green","red")) #seems ok but we can visualize even closer
+points(my.pinus.pts,pch=19) #occurrences should fall onto red areas (and a bit outside since there is no extent lock up here)
+ 
+#now back to a shapefile format
+my.sub.pinus.shp <- rasterToPoints(my.pinus.rst.pa,spatial=TRUE) #should return a megaset of SpatialPointsDataframe with 0 an 1 values
+ 
+#Now we extract the predictor variables into my dataset (in our case only temperatures - we can perform transformations here, such as the PCA over the predictor variables)
+ 
+#w.pca <- rasterPCA(w) #creating a PCA set of variables from the Worldclim temperature dataset
+ 
+my.pred.rst.stack <- stack(w)#,w.stack) #stacking all together
+ 
+my.sub.pinus.shp.extract <- extract(my.pred.rst.stack,
+                                    my.sub.pinus.shp,
+                                    sp=TRUE) #aadd the extracted values to the given SpatialPointsDataFrame
+rdy.pinus.df <- as.data.frame(my.sub.pinus.shp.extract) #we finally have a dataframe of predicted values
+ 
+names(rdy.pinus.df) #now the presence absence information is called layer while all other remain with the given input raster names - we will rename the first for clarity
+names(rdy.pinus.df) <- c("Presence",names(rdy.pinus.df)[2:length(rdy.pinus.df)])
+ 
+ 
+#we sohuld also remove the x,y information - these are the cell center coordinates of the extracted saptialpointsdatafrem
+rdy.pinus.df <- rdy.pinus.df[,c(1:13)]
+ 
+ 
+ 
+#creating a subset for validation and then 2 subset
+trainIndex <- createDataPartition(rdy.pinus.df$Presence,
+                                  p = .7,
+                                  list=FALSE,
+                                  time=1)
+train.df <- rdy.pinus.df[trainIndex,]
+valid.df <- rdy.pinus.df[-trainIndex,]
+ 
+ 
+#time to model using randomForest
+#randF.mdl <- randomForest(Presence~.,train.df) #substitute . by each band name if you dont want a model with all
+#Because we are offering aproximately 1 600 000 points for calibrating the model, the RF can fail to create the model object (due to size)
+ 
+#or we can model using SV
+#model.svm <- svm(Presence~.,data=train.df,type="C")
+ 
+#or using linear regrssion
+model.glm <- glm(Presence~.,data=train.df,family = "binomial")
+ 
+#any parametrization of the models should happen now.
+ 
+#we can try to predict our validation dataset now
+#valid.df$mdl_RF <- predict(randF.mdl,
+#                           newdata=valid.df,
+#                           type="response")
+valid.df$mdl_glm <- predict(model.glm,
+                            newdata=valid.df,
+                            type="response")
+ 
+#unique(as.numeric(as.character(valid.df$mdl_RF)))
+#unique(as.numeric(valid.df$mdl_svm))
+ 
+#once we have the validation predictions we can go into testing the acuraccy of each prediction model #to understand this step check the PresenceAbsence package
+my.evaluation <- data.frame("plotID"=1:nrow(valid.df),
+                            "Observed"=as.numeric(valid.df$Presence),
+                            #"RandF"=as.numeric(as.character(valid.df$mdl_RF)),
+                            "GLM"=valid.df$mdl_glm)
+ 
+#summary:
+presence.absence.accuracy(my.evaluation,
+                          which.model=1)
+auc.roc.plot(my.evaluation,which.model=1)
+ 
+ 
+#
+my.prob.raster <- predict(my.pred.rst.stack,
+                          model=model.glm,type="response")
+plot(my.prob.raster)
+ 
+#you can also load other WCLIM data to transfer your model
+w.transfer = getData('worldclim', var='tmin', res=0.5, lon=-8, lat=45)
+my.prob.raster.transfer <- predict(my.pred.rst.stack,
+                                   model.glm,
+                                   type="response")
