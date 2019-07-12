@@ -1,0 +1,132 @@
+library(raster)
+library(rgdal)
+library(sp)
+library(maptools)
+ 
+ 
+#Model used for transofrmation:
+#Shadow Detection and Removal from RS images using NDI and Morphological operators
+#Singh, KK; Pal, K; Nigam, M.J.
+#International Journal of Computer Applications (March 10, 2012)
+ 
+#Step 1 - RGB to HSV
+ 
+my.rgb <- stack("PATH2RGBSET")
+ 
+#Value component
+V <- (1/3)*(raster(my.rgb,layer=1)+raster(my.rgb,layer=2)+raster(my.rgb,layer=3))
+V
+ 
+#saturation component
+min.rst <- min(my.rgb)
+S <- 1 - (3/(raster(my.rgb,layer=1)+raster(my.rgb,layer=2)+raster(my.rgb,layer=3)))*min.rst
+ 
+#Hue component
+ 
+#Step 1 - conditional areas
+Cond1.rst <- raster(my.rgb,layer=3) <= raster(my.rgb,layer=2)
+Cond2.rst <- Cond1.rst<1
+ 
+#Angle of vector HUE
+theta.up <- (1/2)*((raster(my.rgb,layer=1)-raster(my.rgb,layer=2))+((raster(my.rgb,layer=1)-raster(my.rgb,layer=3))))
+ 
+theta.do <- sqrt( (raster(my.rgb,layer=1)-raster(my.rgb,layer=2))^2 + (raster(my.rgb,layer=1)-raster(my.rgb,layer=3))* (raster(my.rgb,layer=2)-raster(my.rgb,layer=3)))
+ 
+#theta
+theta <- ((cos((theta.up/theta.do)*pi/180))^1)*180/pi
+ 
+#Hue component
+H.Cond1 <- Cond1.rst*theta
+H.Cond2 <- Cond2.rst*(360 - theta)
+ 
+H <- H.Cond1+H.Cond2
+ 
+#Normalized Diff I
+NDI <- (S-V)/(S+V)
+ 
+writeRaster(NDI,
+            "PATH2OUTPUTDIRECTORYANDFILENAME.tif",
+            options=c("COMPRESS=LZW"),
+            overwrite=TRUE)
+ 
+#Any binary thresholding method here or just visually using GIS/image histogram
+ 
+ 
+####
+#### Some basic color correction example-------------------------------
+#### it uses the histograms of the whole (non-shadowed image) vs the shadowed areas.
+ 
+library(raster)
+library(rgdal)
+library(sp)
+library(maptools)
+ 
+#loading RGB
+ 
+my.stack <- stack("path2RGB file")
+ 
+my.rgb <- stack(raster(my.stack,layer=1),
+                raster(my.stack,layer=2),
+                raster(my.stack,layer=3))
+my.rgb
+names(my.rgb) <- c("Red","Gre","Blu")
+ 
+#Loading shadow mask:
+my.sha <- raster("path2binary shadow map")
+my.sha.inv <- my.sha <1
+ 
+plot(my.sha)
+plot(my.sha.inv)
+ 
+my.sha.NA <- my.sha
+my.sha.inv.NA <- my.sha.inv
+ 
+my.sha.NA[my.sha.NA==0]<-NA
+my.sha.inv.NA[my.sha.inv.NA==0]<-NA
+ 
+plot(my.sha.NA)
+plot(my.sha.inv.NA)
+ 
+shad.rgb.NA <- my.rgb*my.sha.NA
+ligh.rgb.NA <- my.rgb*my.sha.inv.NA
+ 
+#now we have the masked areas, we can start trying to calculate statistics
+Sx <- cellStats(x=shad.rgb.NA,
+                stat=sd,
+                asSample=FALSE)
+Sy <- cellStats(x=ligh.rgb.NA,
+                stat=sd,
+                asSample=FALSE)
+Xx <- cellStats(x=shad.rgb.NA,
+                stat=mean,
+                asSample=FALSE)
+Xy <- cellStats(x=ligh.rgb.NA,
+                stat=mean,
+                asSample=FALSE)
+ 
+#using the shadow mask (NOT WITH NA we can calculate the changes)
+my.sha.cor <- (Sy/Sx)*(my.rgb*my.sha-Xx)+Xy
+my.sha
+plot(my.sha.cor)
+ 
+#rescale to 0-255 : 256 levels
+#let's store the minimums and maximum
+min.sha.cor <- cellStats(x=my.sha.cor,
+                         stat=min,
+                         asSample=FALSE)
+ 
+max.sha.cor <- cellStats(x=my.sha.cor,
+                         stat=max,
+                         asSample=FALSE)
+ 
+my.sha.cor.re <- 255*(my.sha.cor - min.sha.cor)/(max.sha.cor - min.sha.cor)
+plot(my.sha.cor.re)
+ 
+#image reconstruction
+my.rgb.cor <- my.rgb*my.sha.inv + my.sha*my.sha.cor.re
+my.rgb.cor
+ 
+writeRaster(my.rgb.cor,
+            filename="outputpath of corrected image.tif",
+            options=c("COMPRESS=LZW"),
+            overwrite=TRUE)
