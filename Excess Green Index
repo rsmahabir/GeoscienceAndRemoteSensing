@@ -1,0 +1,35 @@
+library(raster)
+library(rgdal)
+library(sp)
+library(maptools)
+ 
+ 
+#(Source: Hamuda, Glavin, & Jones, Comput. Electron. Agr. 2016)
+#Excess Green index (ExG)
+ 
+ 
+#loading the raster
+ 
+my.rgb <- stack("path2yourfile.tif")
+ 
+ 
+names(my.rgb)<-c("Red","Gre","Blu","DSM")
+ 
+#chromatic coordinates (or normalization) - Assuming each band records in 8 bit - 256 values from 0 to 255
+ 
+r <- raster(my.rgb,layer=1)/255
+b <- raster(my.rgb,layer=2)/255
+g <- raster(my.rgb,layer=3)/255
+ 
+#calculating indices
+difRG <- r-g
+difGB <- g-b
+quof  <- (g-b)/(r-g)
+ExG <- 2*g-r-b
+ 
+plot(ExG)
+ 
+writeRaster(ExG,
+            filename="outputpathandfilename.tif",
+            options=c("COMPRESS=LZW"),
+            overwrite=TRUE)
